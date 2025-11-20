@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Enhanced Hybrid ASL-to-English Pipeline
+BART-Large Enhanced ASL-to-English Pipeline
 
-Improvements:
-- Better character collapse with letter deduplication awareness
-- Enhanced ASL pattern matching with 100+ common phrases
-- Smarter spell correction that preserves ASL patterns
-- Optional semantic refinement with better prompting
-- Word-level validation to prevent over-correction
+This script processes a stream of characters (typical of ASL fingerspelling input),
+cleans them, and uses a Seq2Seq Transformer (BART-Large) to predict the coherent 
+English sentence.
+
+Key Features:
+- BART-Large Model: Handles typos, missing spaces, capitalization, and punctuation simultaneously.
+- Extensive Pattern Matching: Overrides for 100+ common ASL phrases.
+- Smart Character Collapse: Intelligent deduplication of repeated characters.
 
 Usage:
     pip install -U transformers torch sentencepiece
-    python nlp_refiner_v2.py
+    python nlp_refiner_v3.py
 """
 
 from typing import List, Optional, Tuple, Dict
@@ -28,7 +30,7 @@ except Exception as e:
     )
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
-logger = logging.getLogger("hybrid_asl")
+logger = logging.getLogger("bart_asl")
 
 
 # ---------- Enhanced ASL Pattern Dictionary ----------
@@ -37,7 +39,7 @@ class ASLPatternMatcher:
     """Comprehensive ASL fingerspelling pattern matcher"""
     
     def __init__(self):
-        # Build comprehensive pattern dictionary
+        # Extensive pattern dictionary from your provided code
         self.patterns = {
             # Greetings
             'hello': 'hello',
@@ -117,7 +119,7 @@ class ASLPatternMatcher:
             if pattern == text_clean:
                 return replacement
         
-        # Partial phrase matching for common errors
+        # Partial phrase matching logic
         if 'ilov' in text_clean:
             if 'you' in text_clean:
                 return 'i love you'
@@ -132,7 +134,6 @@ class ASLPatternMatcher:
             return 'thank you'
         
         if 'myname' in text_clean and 'is' in text_clean:
-            # Extract the name after "is"
             parts = text_clean.split('is')
             if len(parts) > 1 and parts[1].strip():
                 name = parts[1].strip()
@@ -150,12 +151,6 @@ class ASLPatternMatcher:
 def smart_collapse_chars(text: str, dedupe_threshold: int = 3) -> str:
     """
     Intelligently collapse character streams while handling duplicates.
-    
-    Rules:
-    - Single letters are joined into words
-    - Consecutive identical letters (e.g., "s s s") are reduced to single letter
-    - Multi-char tokens are preserved
-    - Threshold determines when to deduplicate (default: 3+ consecutive)
     """
     if not text or not text.strip():
         return ""
@@ -174,9 +169,7 @@ def smart_collapse_chars(text: str, dedupe_threshold: int = 3) -> str:
         if not token:
             continue
             
-        # Multi-character token
         if len(token) > 1:
-            # Flush current word
             if current_word:
                 words.append(''.join(current_word))
                 current_word = []
@@ -184,12 +177,9 @@ def smart_collapse_chars(text: str, dedupe_threshold: int = 3) -> str:
                 char_count = 0
             words.append(token)
         
-        # Single character
         elif len(token) == 1 and token.isalpha():
-            # Check for repetition
             if token.lower() == last_char:
                 char_count += 1
-                # Only add if below threshold (deduplicate excessive repeats)
                 if char_count < dedupe_threshold:
                     current_word.append(token)
             else:
@@ -197,7 +187,6 @@ def smart_collapse_chars(text: str, dedupe_threshold: int = 3) -> str:
                 last_char = token.lower()
                 char_count = 1
         
-        # Non-alpha single char (punctuation, etc.)
         else:
             if current_word:
                 words.append(''.join(current_word))
@@ -206,212 +195,115 @@ def smart_collapse_chars(text: str, dedupe_threshold: int = 3) -> str:
                 char_count = 0
             words.append(token)
     
-    # Flush remaining
     if current_word:
         words.append(''.join(current_word))
     
     return ' '.join(words)
 
 
-# ---------- Enhanced Spell Corrector ----------
+# ---------- Enhanced Spell Corrector (BART-Large) ----------
 
 class EnhancedSpellCorrector:
-    """Spell corrector with ASL pattern awareness"""
+    """
+    Spell corrector using facebook/bart-large.
+    Replaces the previous lightweight model with a robust Seq2Seq model
+    that handles spacing, punctuation, and grammar in one go.
+    """
     
-    def __init__(self, model_name: str = "oliverguhr/spelling-correction-english-base", 
-                 device: Optional[str] = None):
-        self.model_name = model_name
+    MODEL_NAME = "facebook/bart-large"
+    
+    def __init__(self, device: Optional[str] = None):
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         self.pattern_matcher = ASLPatternMatcher()
         
-        logger.info(f"Loading spell-corrector: {model_name} on {self.device}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        logger.info(f"Loading BART-Large model: {self.MODEL_NAME} on {self.device}")
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(self.MODEL_NAME)
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(self.MODEL_NAME)
         
         if self.device == "cuda":
             try:
+                # BART-Large is big, half-precision helps memory usage
                 self.model = self.model.half()
+                logger.info("Enabled FP16 for BART-Large")
             except Exception:
                 pass
-        
+                
         self.model.to(self.device)
         self.model.eval()
         
-        # Common English words for validation
-        self.common_words = {
-            'i', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-            'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'shall',
-            'can', 'could', 'may', 'might', 'must', 'should',
-            'the', 'a', 'an', 'this', 'that', 'these', 'those',
-            'my', 'your', 'his', 'her', 'its', 'our', 'their',
-            'me', 'you', 'him', 'her', 'it', 'us', 'them',
-            'what', 'when', 'where', 'why', 'how', 'which', 'who',
-            'hello', 'hi', 'bye', 'thanks', 'thank', 'please', 'sorry',
-            'yes', 'no', 'not', 'very', 'much', 'many', 'some', 'any',
-            'good', 'bad', 'big', 'small', 'new', 'old', 'nice',
-            'love', 'like', 'want', 'need', 'know', 'think', 'see',
-            'name', 'meet', 'studying', 'learning', 'working',
-            'data', 'science', 'computer', 'english', 'math'
-        }
-    
     def correct(self, text: str, max_length: int = 128) -> str:
-        """Correct spelling with ASL pattern awareness"""
+        """
+        Corrects the input string using BART-Large.
+        Input: "thankyouverymuch" (or spaced text)
+        Output: "Thank you very much."
+        """
         
-        # First, try pattern matching
-        pattern_match = self.pattern_matcher.match(text)
+        # 1. Pattern Match Bypass (Highest Priority)
+        # We strip spaces to check against the dictionary effectively
+        collapsed_text = text.replace(' ', '')
+        pattern_match = self.pattern_matcher.match(collapsed_text)
+        
         if pattern_match:
-            logger.debug(f"Pattern match: {text} → {pattern_match}")
-            return pattern_match
+            # Even if we match a pattern, we might want capitalization/punctuation.
+            # However, the dictionary values are clean. Let's capitalize them.
+            return pattern_match[0].upper() + pattern_match[1:]
         
-        # Check if text is already reasonable English
-        words = text.lower().split()
-        if len(words) > 0:
-            # If most words are common English words, minimal correction
-            known_ratio = sum(1 for w in words if w in self.common_words) / len(words)
-            if known_ratio > 0.6:
-                logger.debug(f"Text appears valid ({known_ratio:.0%} known words)")
-                return text
-        
-        # Use spell correction model
+        # 2. BART Correction
+        # We feed the text to BART. BART is robust to missing spaces, 
+        # so we can feed it the collapsed version or the spaced version.
+        # Feeding the 'smart_collapsed' version (e.g. "thankyou") is usually best.
+        input_text = collapsed_text if len(collapsed_text) > 0 else text
+
         try:
             inputs = self.tokenizer(
-                text, 
+                input_text, 
                 return_tensors="pt", 
                 truncation=True, 
-                max_length=512
+                max_length=128
             ).to(self.device)
             
             with torch.no_grad():
                 outputs = self.model.generate(
                     **inputs,
                     max_length=max_length,
-                    num_beams=5,
+                    num_beams=5,           # Higher beams = better quality search
                     early_stopping=True,
-                    repetition_penalty=1.2,
+                    repetition_penalty=1.0, # BART defaults are usually fine
                     length_penalty=1.0,
-                    no_repeat_ngram_size=2,
+                    no_repeat_ngram_size=3
                 )
             
             decoded = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
             result = decoded.strip()
             
-            # Validate: don't accept if model made text much shorter (over-correction)
-            if len(result.split()) < len(text.split()) * 0.4:
-                logger.debug(f"Model over-corrected, keeping original")
+            # Fallback: If BART produces nothing or garbage, return original
+            if not result:
                 return text
-            
-            return result
-            
-        except Exception as e:
-            logger.warning(f"Correction failed: {e}")
-            return text
-
-
-# ---------- Smart Semantic Refiner ----------
-
-class SmartSemanticRefiner:
-    """Lightweight semantic refinement with better prompting"""
-    
-    def __init__(self, model_name: Optional[str] = "google/flan-t5-small", 
-                 device: Optional[str] = None):
-        self.enabled = model_name is not None
-        if not self.enabled:
-            return
-        
-        self.model_name = model_name
-        self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
-        
-        logger.info(f"Loading semantic refiner: {model_name} on {self.device}")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-        
-        if self.device == "cuda":
-            try:
-                self.model = self.model.half()
-            except Exception:
-                pass
-        
-        self.model.to(self.device)
-        self.model.eval()
-    
-    def refine(self, text: str, max_length: int = 128) -> str:
-        """Add punctuation and capitalization without changing words"""
-        if not self.enabled:
-            return text
-        
-        # Simple rule-based capitalization for short phrases
-        words = text.split()
-        if len(words) <= 6:
-            # Capitalize first word
-            if words:
-                words[0] = words[0].capitalize()
-            
-            # Add period if no ending punctuation
-            result = ' '.join(words)
+                
+            # Post-processing: Ensure basic punctuation if BART missed it
             if result and result[-1] not in '.!?':
                 result += '.'
             
             return result
-        
-        # For longer text, use model
-        prompt = (
-            f"Add proper capitalization and punctuation to this sentence. "
-            f"Do not change any words: {text}"
-        )
-        
-        try:
-            inputs = self.tokenizer(
-                prompt, 
-                return_tensors="pt", 
-                truncation=True, 
-                max_length=512
-            ).to(self.device)
-            
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_length=max_length,
-                    num_beams=3,
-                    early_stopping=True,
-                    repetition_penalty=1.1,
-                )
-            
-            decoded = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            result = decoded.strip()
-            
-            # Validate: check if words were changed significantly
-            orig_words = set(text.lower().replace('.', '').replace(',', '').split())
-            new_words = set(result.lower().replace('.', '').replace(',', '').split())
-            
-            # If too many words changed, skip refinement
-            if len(orig_words - new_words) > len(orig_words) * 0.3:
-                logger.debug("Semantic refiner changed too many words, skipping")
-                return text
-            
-            return result
             
         except Exception as e:
-            logger.warning(f"Refinement failed: {e}")
+            logger.warning(f"BART Correction failed: {e}")
             return text
 
 
-# ---------- Enhanced Pipeline ----------
+# ---------- Enhanced Pipeline (Unified) ----------
 
 class EnhancedASLPipeline:
-    """Enhanced ASL-to-English pipeline with better accuracy"""
+    """
+    Unified ASL-to-English pipeline.
+    Removed 'SmartSemanticRefiner' because BART-Large handles refinement naturally.
+    """
     
-    def __init__(self, 
-                 spell_model: str = "oliverguhr/spelling-correction-english-base",
-                 semantic_model: Optional[str] = None,  # Disabled by default
-                 use_semantic: bool = False):
-        
-        self.spell_corrector = EnhancedSpellCorrector(spell_model)
-        self.semantic_refiner = (
-            SmartSemanticRefiner(semantic_model) 
-            if use_semantic and semantic_model 
-            else None
-        )
-        self.pattern_matcher = ASLPatternMatcher()
+    def __init__(self):
+        # We no longer need separate spell/semantic models. 
+        # BART-Large does it all.
+        self.spell_corrector = EnhancedSpellCorrector()
     
     def process(self, raw_buffer: str) -> Tuple[str, Dict]:
         """Process ASL fingerspelling to English text"""
@@ -424,26 +316,16 @@ class EnhancedASLPipeline:
         meta["cleaned"] = cleaned
         
         # Step 2: Smart character collapse with deduplication
+        # Turns "t h a n k" -> "thank"
         collapsed = smart_collapse_chars(cleaned, dedupe_threshold=3)
         meta["collapsed"] = collapsed
         
-        # Step 3: Pattern matching (highest priority)
-        pattern_result = self.pattern_matcher.match(collapsed)
-        if pattern_result:
-            meta["method"] = "pattern_match"
-            meta["corrected"] = pattern_result
-            final = pattern_result
-        else:
-            # Step 4: Spell correction
-            corrected = self.spell_corrector.correct(collapsed)
-            meta["method"] = "spell_correction"
-            meta["corrected"] = corrected
-            final = corrected
+        # Step 3: BART Correction (Pattern matching is inside)
+        corrected = self.spell_corrector.correct(collapsed)
         
-        # Step 5: Optional semantic refinement
-        if self.semantic_refiner:
-            final = self.semantic_refiner.refine(final)
-            meta["refined"] = final
+        meta["method"] = "BART-Large (Seq2Seq)"
+        meta["corrected"] = corrected
+        final = corrected
         
         meta["final"] = final
         meta["processing_time_seconds"] = round(time.time() - t0, 4)
@@ -455,28 +337,62 @@ class EnhancedASLPipeline:
 
 if __name__ == "__main__":
     demo_inputs = [
-        "i l o v m s s m e e",
-        "h e l l o m y n a m e i s s n e h a",
-        "i a m s t u d y i n g b i g d a t a",
-        "t h a n k y o u v e r y m u c h",
-        "w h a t i s y o u r n a m e",
-        "n i c e t o m m e e t y o u",
-        "h e l ll o m y n a m e i s s n e h a a",
-        "i l o v e y o u",
-        "h o w a r e y o u",
-        "g o o d m o r n i n g",
+        "i l o v m s s m e e",             # Typo: "iloveme" or "ilovemess"?
+        "h e l l o m y n a m e i s s n e h a", # Name extraction
+        "i a m s t u d y i n g b i g d a t a", # Merged words
+        "t h a n k y o u v e r y m u c h", # Common phrase
+        "w h a t i s y o u r n a m e",     # Question
+        "n i c e t o m m e e t y o u",     # Repetition
+        "h e l ll o m y n a m e i s s n e h a a", # Heavy noise
+        "i l o v e y o u",                 # Simple
+        "h o w a r e y o u",               # Question
     ]
     
-    print("🤟 Enhanced ASL-to-English Pipeline\n")
+    print("🤟 BART-Large Enhanced ASL Pipeline\n")
+    print("Loading model... (This may take a moment for 400M parameters)\n")
     
-    # Without semantic refinement (recommended for accuracy)
-    pipeline = EnhancedASLPipeline(use_semantic=False)
+    pipeline = EnhancedASLPipeline()
     
     for sample in demo_inputs:
         final, debug = pipeline.process(sample)
         print(f"📝 Input:    {sample}")
+        print(f"🔗 Collapsed: {debug['collapsed']}")
         print(f"✨ Output:   {final}")
-        print(f"🔍 Method:   {debug['method']}")
-        print(f"   Steps:    {debug['collapsed']} → {debug['corrected']}")
         print(f"⏱️  Time:     {debug['processing_time_seconds']}s")
-        print()
+        print("-" * 30)
+
+
+# ---------- Compatibility Function for Streamlit App ----------
+
+# Global pipeline instance for efficiency
+_global_pipeline = None
+
+def get_pipeline():
+    """Get or create global pipeline instance"""
+    global _global_pipeline
+    if _global_pipeline is None:
+        _global_pipeline = EnhancedASLPipeline()
+    return _global_pipeline
+
+def refine_asl_buffer(buffer_string: str) -> dict:
+    """
+    Compatibility function for streamlit_app.py
+    
+    Args:
+        buffer_string: Raw ASL buffer string
+        
+    Returns:
+        Dictionary with refinement results matching the expected format
+    """
+    pipeline = get_pipeline()
+    final_text, metadata = pipeline.process(buffer_string)
+    
+    # Format to match the expected Streamlit interface
+    return {
+        'original_buffer': buffer_string,
+        'preprocessed': metadata.get('cleaned', buffer_string),
+        'cleaned': metadata.get('collapsed', buffer_string),
+        'refined_text': final_text,
+        'processing_time_seconds': metadata.get('processing_time_seconds', 0),
+        'model_device': 'cpu'  # Default device info
+    }
