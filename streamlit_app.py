@@ -15,7 +15,32 @@ import atexit
 
 from utils.cvfpscalc import CvFpsCalc
 from model.keypoint_classifier.keypoint_classifier import KeyPointClassifier
-from nlp_refiner import refine_asl_buffer, test_lm_studio_connection
+
+# Import translation with error handling
+try:
+    from deep_translator import GoogleTranslator
+    TRANSLATION_AVAILABLE = True
+except ImportError as e:
+    st.error(f"Translation unavailable due to dependency issue: {e}")
+    TRANSLATION_AVAILABLE = False
+    # Fallback translator class
+    class GoogleTranslator:
+        @staticmethod
+        def translate(text, target='en'):
+            return text
+
+# Import NLP refiner with error handling
+try:
+    from nlp_refiner import refine_asl_buffer, test_lm_studio_connection
+    NLP_AVAILABLE = True
+except ImportError as e:
+    st.error(f"NLP Refiner unavailable due to dependency issue: {e}")
+    NLP_AVAILABLE = False
+    # Fallback functions
+    def refine_asl_buffer(text):
+        return {"refined_text": text, "preprocessed": text, "cleaned": text}
+    def test_lm_studio_connection():
+        return False, "NLP dependencies not available"
 
 # --- IMPORT THE EMOTION DETECTOR ---
 from emotion_detection import AsyncEmotionDetector
@@ -61,6 +86,50 @@ if 'emotion_history' not in st.session_state:
     st.session_state.emotion_history = []
 if 'emotion_start_time' not in st.session_state:
     st.session_state.emotion_start_time = None
+# No need to initialize translator for deep-translator
+
+# Language options for translation
+LANGUAGE_OPTIONS = {
+    'Spanish': 'es',
+    'French': 'fr',
+    'German': 'de',
+    'Italian': 'it',
+    'Portuguese': 'pt',
+    'Russian': 'ru',
+    'Japanese': 'ja',
+    'Korean': 'ko',
+    'Chinese (Simplified)': 'zh-cn',
+    'Chinese (Traditional)': 'zh-tw',
+    'Arabic': 'ar',
+    'Hindi': 'hi',
+    'Dutch': 'nl',
+    'Swedish': 'sv',
+    'Norwegian': 'no',
+    'Danish': 'da',
+    'Finnish': 'fi',
+    'Polish': 'pl',
+    'Czech': 'cs',
+    'Hungarian': 'hu',
+    'Romanian': 'ro',
+    'Bulgarian': 'bg',
+    'Croatian': 'hr',
+    'Serbian': 'sr',
+    'Slovak': 'sk',
+    'Slovenian': 'sl',
+    'Lithuanian': 'lt',
+    'Latvian': 'lv',
+    'Estonian': 'et',
+    'Greek': 'el',
+    'Turkish': 'tr',
+    'Hebrew': 'he',
+    'Thai': 'th',
+    'Vietnamese': 'vi',
+    'Indonesian': 'id',
+    'Malay': 'ms',
+    'Filipino': 'tl',
+    'Swahili': 'sw',
+    'Afrikaans': 'af'
+}
 
 # --- INITIALIZE EMOTION DETECTOR IN SESSION STATE ---
 if 'emotion_detector' not in st.session_state:
@@ -102,7 +171,7 @@ def save_session_to_mongodb(session_id, letter_buffer):
     except Exception as e:
         st.error(f"Failed to save to MongoDB: {e}")
 
-def save_refined_sentence_to_mongodb(session_id, original_buffer, refinement_result, emotion_data=None):
+def save_refined_sentence_to_mongodb(session_id, original_buffer, refinement_result, emotion_data=None, translation_data=None):
     if not original_buffer:
         return
     
@@ -133,6 +202,19 @@ def save_refined_sentence_to_mongodb(session_id, original_buffer, refinement_res
                         'unique_emotions_detected': list(emotion_counts.keys())
                     }
             
+            # Add translation data if available
+            translation_stats = {}
+            if translation_data:
+                translation_stats = {
+                    'translated_text': translation_data.get('translated_text', ''),
+                    'target_language': translation_data.get('target_language', ''),
+                    'language_name': translation_data.get('language_name', ''),
+                    'translation_status': translation_data.get('status', ''),
+                    'translation_enabled': True
+                }
+            else:
+                translation_stats = {'translation_enabled': False}
+            
             refined_data = {
                 'session_id': session_id,
                 'timestamp': datetime.now(),
@@ -144,7 +226,8 @@ def save_refined_sentence_to_mongodb(session_id, original_buffer, refinement_res
                 'processing_time_seconds': refinement_result.get('processing_time_seconds', 0),
                 'model_device': refinement_result.get('model_device', 'unknown'),
                 'buffer_length': len(original_buffer),
-                **emotion_stats  # Add emotion statistics
+                **emotion_stats,  # Add emotion statistics
+                **translation_stats  # Add translation data
             }
             
             collection.insert_one(refined_data)
@@ -182,6 +265,18 @@ def get_emotion_summary():
         'duration': duration
     }
 
+def translate_text(text, target_language='es'):
+    """Translate text to target language"""
+    if not TRANSLATION_AVAILABLE or not text.strip():
+        return text, "Translation not available"
+    
+    try:
+        translator = GoogleTranslator(source='auto', target=target_language)
+        result = translator.translate(text)
+        return result, "Success"
+    except Exception as e:
+        return text, f"Translation error: {str(e)}"
+
 def cleanup_session():
     if st.session_state.get('letter_buffer'):
         save_session_to_mongodb(
@@ -196,7 +291,8 @@ def cleanup_session():
                 st.session_state.session_id,
                 st.session_state.letter_buffer,
                 refinement_result,
-                emotion_summary
+                emotion_summary,
+                None  # No translation in cleanup
             )
             print(f"[DEBUG] Cleanup refined: {refinement_result.get('refined_text', 'No result')}")
         except Exception as e:
@@ -401,21 +497,24 @@ def main():
         # Performance toggle
         emotion_enabled = st.checkbox("Enable Emotion Detection", value=True, help="Disable to improve FPS performance")
         
-        # Performance info
-        st.info("💡 **Performance Tips:**\n- Disable emotion detection for max FPS\n- Lower camera resolution for better performance\n- Reduce detection confidence for faster processing")
+        # Translation toggle
+        translation_enabled = st.checkbox("Enable Translation", value=False, help="Translate refined text to other languages") if TRANSLATION_AVAILABLE else False
+        
+        # Language selection (only show if translation is enabled)
+        selected_language = None
+        target_lang_code = None
+        if translation_enabled and TRANSLATION_AVAILABLE:
+            st.subheader("🌐 Translation Settings")
+            selected_language = st.selectbox(
+                "Target Language", 
+                list(LANGUAGE_OPTIONS.keys()),
+                index=0,
+                help="Select the language to translate refined text to"
+            )
+            target_lang_code = LANGUAGE_OPTIONS[selected_language]
+            st.info(f"🎯 Translating to: **{selected_language}** ({target_lang_code})")
         
         # LM Studio connection status
-        st.subheader("🤖 NLP Refiner Status")
-        if st.button("🔄 Check LM Studio Connection", width='stretch'):
-            with st.spinner("Testing connection..."):
-                connected, msg = test_lm_studio_connection()
-            if connected:
-                st.success(f"✅ {msg}")
-            else:
-                st.error(f"❌ {msg}")
-                st.info("💡 Make sure LM Studio is running with a loaded model at http://192.168.18.1:1234")
-        
-        st.subheader("Parameters")
         min_detection_confidence = st.slider("Min Detection Confidence", 0.1, 1.0, 0.7, 0.1)
         min_tracking_confidence = st.slider("Min Tracking Confidence", 0.1, 1.0, 0.5, 0.1)
         st.session_state.letter_hold_duration = st.slider("Letter Hold Time (s)", 0.5, 3.0, 1.5, 0.1)
@@ -449,8 +548,29 @@ def main():
                 try:
                     with st.spinner("Testing NLP refiner..."):
                         refinement_result = refine_asl_buffer(buffer_string)
-                        save_refined_sentence_to_mongodb(st.session_state.session_id, st.session_state.letter_buffer, refinement_result, emotion_summary)
+                        
+                        # Test translation if enabled
+                        translation_data = None
+                        if translation_enabled and target_lang_code and TRANSLATION_AVAILABLE:
+                            refined_text = refinement_result.get('refined_text', '')
+                            if refined_text.strip():
+                                with st.spinner(f"Testing translation to {selected_language}..."):
+                                    translated_text, translation_status = translate_text(refined_text, target_lang_code)
+                                    translation_data = {
+                                        'translated_text': translated_text,
+                                        'target_language': target_lang_code,
+                                        'language_name': selected_language,
+                                        'status': translation_status
+                                    }
+                        
+                        save_refined_sentence_to_mongodb(st.session_state.session_id, st.session_state.letter_buffer, refinement_result, emotion_summary, translation_data)
+                    
                     st.success(f"✅ Result: '{refinement_result.get('refined_text', 'No result')}'")
+                    
+                    # Show translation result if available
+                    if translation_data and translation_data.get('status') == 'Success':
+                        st.success(f"🌐 {selected_language}: '{translation_data.get('translated_text', '')}'")
+                    
                     st.json(refinement_result)  # Show full result
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
@@ -518,10 +638,32 @@ def main():
             with st.spinner("🤖 Refining text with AI..."):
                 try:
                     refinement_result = refine_asl_buffer(buffer_string)
-                    save_refined_sentence_to_mongodb(st.session_state.session_id, st.session_state.letter_buffer, refinement_result, emotion_summary)
                     
-                    # Show success message with result
-                    st.success(f"✅ Refined: '{refinement_result.get('refined_text', 'No result')}'")
+                    # Handle translation if enabled
+                    translation_data = None
+                    if translation_enabled and target_lang_code and TRANSLATION_AVAILABLE:
+                        refined_text = refinement_result.get('refined_text', '')
+                        if refined_text.strip():
+                            with st.spinner(f"🌐 Translating to {selected_language}..."):
+                                translated_text, translation_status = translate_text(refined_text, target_lang_code)
+                                translation_data = {
+                                    'translated_text': translated_text,
+                                    'target_language': target_lang_code,
+                                    'language_name': selected_language,
+                                    'status': translation_status
+                                }
+                    
+                    save_refined_sentence_to_mongodb(st.session_state.session_id, st.session_state.letter_buffer, refinement_result, emotion_summary, translation_data)
+                    
+                    # Show success messages
+                    refined_text = refinement_result.get('refined_text', 'No result')
+                    st.success(f"✅ Refined: '{refined_text}'")
+                    
+                    # Show translation if available
+                    if translation_data and translation_data.get('status') == 'Success':
+                        st.success(f"🌐 {selected_language}: '{translation_data.get('translated_text', '')}'")
+                    elif translation_enabled and translation_data:
+                        st.warning(f"⚠️ Translation issue: {translation_data.get('status', 'Unknown error')}")
                     
                 except Exception as e:
                     st.error(f"❌ NLP Refiner Error: {str(e)}")
