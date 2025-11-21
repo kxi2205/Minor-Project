@@ -1,15 +1,42 @@
-opencv-python
-mediapipe
+# Core ML and Data Processing
+numpy>=1.21.0,<2.0.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Computer Vision and MediaPipe
+opencv-python>=4.5.0
+mediapipe>=0.10.0
+Pillow>=8.0.0
+
+# Deep Learning - TensorFlow ecosystem
 tensorflow==2.16.1
-Pillow
-numpy<2
-pandas
-seaborn
-scikit-learn
-matplotlib
-streamlit
-pymongo
-python-dotenv
-transformers
-torch
-sentencepiece
+tf-keras>=2.16.0
+
+# Deep Learning - PyTorch ecosystem  
+torch>=2.0.0,<2.3.0
+torchvision>=0.15.0
+
+# Hugging Face and NLP
+transformers>=4.30.0,<5.0.0
+datasets>=2.14.0
+tokenizers>=0.13.0
+sentencepiece>=0.1.99
+accelerate>=0.20.0
+evaluate>=0.4.0
+
+# Web Framework
+streamlit>=1.25.0
+
+# Database and Environment
+pymongo>=4.0.0
+python-dotenv>=0.19.0
+
+# OpenAI API client
+openai>=1.0.0
+
+# Additional utilities
+protobuf>=3.20.0,<5.0.0
+requests>=2.25.0
+tqdm>=4.64.0
