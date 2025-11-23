@@ -45,6 +45,17 @@ except ImportError as e:
 # --- IMPORT THE EMOTION DETECTOR ---
 from emotion_detection import AsyncEmotionDetector
 
+# --- IMPORT TTS MANAGER ---
+try:
+    from tts_manager import PiperTTSManager
+    TTS_AVAILABLE = True
+except ImportError as e:
+    st.error(f"TTS unavailable due to dependency issue: {e}")
+    TTS_AVAILABLE = False
+    class PiperTTSManager:
+        def __init__(self, *args): pass
+        def is_available(self): return False
+
 # Load environment variables
 load_dotenv()
 
@@ -86,6 +97,14 @@ if 'emotion_history' not in st.session_state:
     st.session_state.emotion_history = []
 if 'emotion_start_time' not in st.session_state:
     st.session_state.emotion_start_time = None
+if 'tts_enabled' not in st.session_state:
+    st.session_state.tts_enabled = False
+if 'tts_manager' not in st.session_state:
+    st.session_state.tts_manager = None
+if 'selected_voice' not in st.session_state:
+    st.session_state.selected_voice = 'Sam (Male - Medium)'
+if 'tts_speed' not in st.session_state:
+    st.session_state.tts_speed = 1.0
 # No need to initialize translator for deep-translator
 
 # Language options for translation
@@ -512,7 +531,59 @@ def main():
                 help="Select the language to translate refined text to"
             )
             target_lang_code = LANGUAGE_OPTIONS[selected_language]
-            st.info(f"🎯 Translating to: **{selected_language}** ({target_lang_code})")
+        
+        # TTS Settings
+        if TTS_AVAILABLE:
+            tts_enabled = st.checkbox("Enable Text-to-Speech", value=st.session_state.tts_enabled, help="Convert refined text to speech")
+            st.session_state.tts_enabled = tts_enabled
+            
+            if tts_enabled:
+                st.subheader("🔊 TTS Settings")
+                
+                # Voice selection - All 10 available voices
+                voice_options = {
+                    'Sam (Male - Medium)': 'en_US-sam-medium.onnx',
+                    'Amy (Female - Medium)': 'en_US-amy-medium.onnx',
+                    'Arctic (Male - Medium)': 'en_US-arctic-medium.onnx',
+                    'Bryce (Male - Medium)': 'en_US-bryce-medium.onnx',
+                    'Ryan (Male - High)': 'en_US-ryan-high.onnx',
+                    'HFC Female (Female - Medium)': 'en_US-hfc_female-medium.onnx',
+                    'HFC Male (Male - Medium)': 'en_US-hfc_male-medium.onnx',
+                    'Lessac (High Quality)': 'en_US-lessac-high.onnx',
+                    'LibriTTS (High Quality)': 'en_US-libritts-high.onnx',
+                    'Norman (Male - Medium)': 'en_US-norman-medium.onnx'
+                }
+                
+                selected_voice = st.selectbox(
+                    "Voice Model",
+                    options=list(voice_options.keys()),
+                    index=list(voice_options.keys()).index(st.session_state.selected_voice) if st.session_state.selected_voice in voice_options else 0,
+                    help="Choose from 10 professional voice models. High quality voices offer better clarity."
+                )
+                st.session_state.selected_voice = selected_voice
+                
+                # Speed control
+                
+                # Initialize TTS manager if voice changed
+                if st.session_state.tts_manager is None or st.session_state.selected_voice != selected_voice:
+                    voice_file = voice_options[selected_voice]
+                    voice_path = os.path.join("voices", voice_file)
+                    config_path = voice_path.replace(".onnx", ".onnx.json")
+                    
+                    if os.path.exists(voice_path) and os.path.exists(config_path):
+                        try:
+                            st.session_state.tts_manager = PiperTTSManager(voice_path, config_path)
+                            if st.session_state.tts_manager.is_available():
+                                st.info(f"🔊 Ready")
+                            else:
+                                st.error("❌ Failed to load TTS model")
+                        except Exception as e:
+                            st.error(f"❌ TTS Error: {str(e)}")
+                            st.error("💡 Make sure all voice files are present in the voices/ directory")
+                    else:
+                        st.error(f"❌ Voice files not found: {voice_file}")
+        else:
+            st.warning("⚠️ TTS not available - install piper-tts")
         
         # LM Studio connection status
         min_detection_confidence = st.slider("Min Detection Confidence", 0.1, 1.0, 0.7, 0.1)
@@ -535,48 +606,6 @@ def main():
             st.session_state.current_letter = ''
             st.session_state.letter_start_time = None
             st.rerun()
-        
-        # Manual refine button for testing
-        if st.button("🤖 Test NLP Refiner", width='stretch'):
-            if st.session_state.letter_buffer:
-                buffer_string = ' '.join(st.session_state.letter_buffer)
-                emotion_summary = get_emotion_summary()
-                st.info(f"Testing with buffer: '{buffer_string}'")
-                if emotion_summary:
-                    avg_emotion = max(set(emotion_summary['history']), key=emotion_summary['history'].count) if emotion_summary['history'] else 'neutral'
-                    st.info(f"Session emotion data: {avg_emotion} ({len(emotion_summary['history'])} samples)")
-                try:
-                    with st.spinner("Testing NLP refiner..."):
-                        refinement_result = refine_asl_buffer(buffer_string)
-                        
-                        # Test translation if enabled
-                        translation_data = None
-                        if translation_enabled and target_lang_code and TRANSLATION_AVAILABLE:
-                            refined_text = refinement_result.get('refined_text', '')
-                            if refined_text.strip():
-                                with st.spinner(f"Testing translation to {selected_language}..."):
-                                    translated_text, translation_status = translate_text(refined_text, target_lang_code)
-                                    translation_data = {
-                                        'translated_text': translated_text,
-                                        'target_language': target_lang_code,
-                                        'language_name': selected_language,
-                                        'status': translation_status
-                                    }
-                        
-                        save_refined_sentence_to_mongodb(st.session_state.session_id, st.session_state.letter_buffer, refinement_result, emotion_summary, translation_data)
-                    
-                    st.success(f"✅ Result: '{refinement_result.get('refined_text', 'No result')}'")
-                    
-                    # Show translation result if available
-                    if translation_data and translation_data.get('status') == 'Success':
-                        st.success(f"🌐 {selected_language}: '{translation_data.get('translated_text', '')}'")
-                    
-                    st.json(refinement_result)  # Show full result
-                except Exception as e:
-                    st.error(f"❌ Error: {str(e)}")
-                    st.error("💡 Check if LM Studio is running on the correct IP/port")
-            else:
-                st.warning("⚠️ Buffer is empty! Detect some letters first.")
         
         col1, col2 = st.columns(2)
         with col1:
@@ -664,6 +693,34 @@ def main():
                         st.success(f"🌐 {selected_language}: '{translation_data.get('translated_text', '')}'")
                     elif translation_enabled and translation_data:
                         st.warning(f"⚠️ Translation issue: {translation_data.get('status', 'Unknown error')}")
+                    
+                    # Generate TTS if enabled - ALWAYS use refined English text for natural speech
+                    if st.session_state.tts_enabled and st.session_state.tts_manager and st.session_state.tts_manager.is_available():
+                        try:
+                            # IMPORTANT: Always use refined English text for TTS (never translated text)
+                            # Translation is only for display - TTS needs natural English for best results
+                            text_to_speak = refined_text
+                            
+                            # Get dominant emotion for TTS
+                            emotion_for_tts = 'neutral'
+                            if emotion_summary and emotion_summary['history']:
+                                emotion_for_tts = max(set(emotion_summary['history']), key=emotion_summary['history'].count)
+                            
+                            with st.spinner(f"🎙️ Generating speech with {st.session_state.selected_voice}..."):
+                                # Generate audio
+                                audio_data = st.session_state.tts_manager.generate_audio_bytes(
+                                    text_to_speak, 
+                                    emotion_for_tts, 
+                                    st.session_state.tts_speed
+                                )
+                            
+                            # Play audio directly
+                            st.audio(audio_data, format='audio/wav')
+                            st.success(f"✅ Speech synthesis complete!")
+                            
+                        except Exception as e:
+                            st.error(f"❌ TTS Generation Error: {str(e)}")
+                            st.error("💡 Try selecting a different voice or check if the voice files are corrupted")
                     
                 except Exception as e:
                     st.error(f"❌ NLP Refiner Error: {str(e)}")
