@@ -103,6 +103,8 @@ if 'tts_manager' not in st.session_state:
     st.session_state.tts_manager = None
 if 'selected_voice' not in st.session_state:
     st.session_state.selected_voice = 'Sam (Male - Medium)'
+if 'loaded_voice_model' not in st.session_state:
+    st.session_state.loaded_voice_model = None  # Track which voice model is actually loaded
 if 'tts_speed' not in st.session_state:
     st.session_state.tts_speed = 1.0
 # No need to initialize translator for deep-translator
@@ -538,7 +540,6 @@ def main():
             st.session_state.tts_enabled = tts_enabled
             
             if tts_enabled:
-                st.subheader("🔊 TTS Settings")
                 
                 # Voice selection - All 10 available voices
                 voice_options = {
@@ -560,21 +561,33 @@ def main():
                     index=list(voice_options.keys()).index(st.session_state.selected_voice) if st.session_state.selected_voice in voice_options else 0,
                     help="Choose from 10 professional voice models. High quality voices offer better clarity."
                 )
+                
+                # Check if voice changed BEFORE updating session state
+                voice_changed = (st.session_state.selected_voice != selected_voice or 
+                               st.session_state.loaded_voice_model != selected_voice)
                 st.session_state.selected_voice = selected_voice
                 
                 # Speed control
+                tts_speed = st.slider("Speech Speed", 0.5, 2.0, st.session_state.tts_speed, 0.1)
+                st.session_state.tts_speed = tts_speed
                 
-                # Initialize TTS manager if voice changed
-                if st.session_state.tts_manager is None or st.session_state.selected_voice != selected_voice:
+                # Initialize TTS manager if voice changed or not initialized
+                if st.session_state.tts_manager is None or voice_changed:
                     voice_file = voice_options[selected_voice]
                     voice_path = os.path.join("voices", voice_file)
                     config_path = voice_path.replace(".onnx", ".onnx.json")
                     
                     if os.path.exists(voice_path) and os.path.exists(config_path):
                         try:
-                            st.session_state.tts_manager = PiperTTSManager(voice_path, config_path)
+                            if voice_changed:
+                                with st.spinner(f"🔄 Loading {selected_voice}..."):
+                                    st.session_state.tts_manager = PiperTTSManager(voice_path, config_path)
+                            else:
+                                st.session_state.tts_manager = PiperTTSManager(voice_path, config_path)
+                                
                             if st.session_state.tts_manager.is_available():
-                                st.info(f"🔊 Ready")
+                                st.session_state.loaded_voice_model = selected_voice  # Track loaded model
+    
                             else:
                                 st.error("❌ Failed to load TTS model")
                         except Exception as e:
